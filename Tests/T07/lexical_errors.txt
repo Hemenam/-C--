@@ -1,1 +1,1 @@
-3.	(/* Unclos..., Open comment at EOF)
+3.	(/* Unclosed ..., Open comment at EOF)
