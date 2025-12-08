@@ -2,23 +2,25 @@
 """
 run_tests.py
 
-Run lexical.py (in Lexical/) on Tests/T01..T10 and print diffs between expected and produced files.
-
-Place this script in the repository root (siblings: Lexical/ and Tests/).
+Run lexical.py (in Lexical/) on Tests/T01..T10 without modifying the Tests/ folders.
+For each test, the scanner runs in a temporary directory containing a copy of input.txt,
+so the original test files are never changed.
 """
 
 import os
 import sys
 import subprocess
 import difflib
+import shutil
+import tempfile
 from pathlib import Path
 
 # Config
 NUM_TESTS = 10
 TESTS_DIR = Path("Tests")
-LEXICAL_SCRIPT = Path("Lexical") / "lexical.py"  # change if your scanner filename differs
+LEXICAL_SCRIPT = Path("Lexical") / "lexical.py"  # edit if your scanner is named differently
 EXPECTED_FILES = ["tokens.txt", "lexical_errors.txt", "symbol_table.txt"]
-RUN_TIMEOUT_SECONDS = 10  # optional; adjust or remove if you prefer no timeout
+RUN_TIMEOUT_SECONDS = 10  # adjust if needed
 
 def read_file_safe(path: Path):
     try:
@@ -27,12 +29,11 @@ def read_file_safe(path: Path):
     except FileNotFoundError:
         return None
     except Exception as e:
-        return ["<ERROR READING FILE: {}>\n".format(e)]
+        return [f"<ERROR READING FILE: {e}>\n"]
 
 def unified_diff_str(expected_lines, produced_lines, fromfile, tofile):
-    # If either is None => file missing
     if expected_lines is None and produced_lines is None:
-        return ""  # no expected and no produced -> treat as no diff
+        return ""  # nothing expected and nothing produced => treat as no diff
     if expected_lines is None:
         return f"Expected file {fromfile} is MISSING; produced {tofile} exists.\n"
     if produced_lines is None:
@@ -44,76 +45,94 @@ def unified_diff_str(expected_lines, produced_lines, fromfile, tofile):
 def run_single_test(test_dir: Path, lexical_script: Path):
     print(f"\n=== Running test: {test_dir} ===")
 
-    # 1) Read expected files BEFORE running scanner (to avoid being overwritten)
+    # 1) Read expected files BEFORE running scanner
     expected_contents = {}
     for fname in EXPECTED_FILES:
         p = test_dir / fname
         expected_contents[fname] = read_file_safe(p)
 
-    # 2) Run scanner with cwd set to test_dir
-    if not lexical_script.exists():
-        print(f"ERROR: lexical script not found at {lexical_script.resolve()}. Aborting test run.")
+    # Ensure the input exists in the test folder
+    input_path = test_dir / "input.txt"
+    if not input_path.exists():
+        print(f"ERROR: test {test_dir} missing input.txt; skipping.")
         return False
 
-    try:
-        proc = subprocess.run(
-            [sys.executable, str(lexical_script.resolve())],
-            cwd=str(test_dir.resolve()),
-            capture_output=True,
-            text=True,
-            timeout=RUN_TIMEOUT_SECONDS
-        )
-    except subprocess.TimeoutExpired as e:
-        print(f"ERROR: scanner timed out after {RUN_TIMEOUT_SECONDS} seconds.")
-        return False
-    except Exception as e:
-        print(f"ERROR: failed to run scanner: {e}")
-        return False
+    # 2) Prepare a temporary working directory (so we don't touch test folder files)
+    with tempfile.TemporaryDirectory() as tmpdirname:
+        tmpdir = Path(tmpdirname)
 
-    # print scanner stdout/stderr if present
-    if proc.stdout.strip():
-        print("--- scanner stdout ---")
-        print(proc.stdout.strip())
-    if proc.stderr.strip():
-        print("--- scanner stderr ---")
-        print(proc.stderr.strip())
+        # Copy input.txt to temporary directory
+        shutil.copy2(str(input_path), str(tmpdir / "input.txt"))
 
-    # 3) Read produced files (after run)
-    produced_contents = {}
-    for fname in EXPECTED_FILES:
-        p = test_dir / fname
-        produced_contents[fname] = read_file_safe(p)
+        # Run the lexical scanner in the temporary directory (cwd=tmpdir).
+        # We pass the absolute path to the lexical script so Python executes that file,
+        # but the scanner's working directory is the temp dir (so outputs land there).
+        if not lexical_script.exists():
+            print(f"ERROR: lexical script not found at {lexical_script.resolve()}. Aborting test run.")
+            return False
 
-    # 4) Compare and print diffs
-    all_pass = True
-    for fname in EXPECTED_FILES:
-        expected = expected_contents.get(fname)
-        produced = produced_contents.get(fname)
-        fromfile = f"{test_dir}/{fname} (expected)"
-        tofile = f"{test_dir}/{fname} (produced)"
-        diff = unified_diff_str(expected, produced, fromfile, tofile)
-        if diff:
-            all_pass = False
-            print(f"\n--- DIFF for {fname} ---")
-            print(diff)
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(lexical_script.resolve())],
+                cwd=str(tmpdir),
+                capture_output=True,
+                text=True,
+                timeout=RUN_TIMEOUT_SECONDS
+            )
+        except subprocess.TimeoutExpired:
+            print(f"ERROR: scanner timed out after {RUN_TIMEOUT_SECONDS} seconds.")
+            return False
+        except Exception as e:
+            print(f"ERROR: failed to run scanner: {e}")
+            return False
+
+        # print scanner stdout/stderr if present
+        if proc.stdout.strip():
+            print("--- scanner stdout ---")
+            print(proc.stdout.strip())
+        if proc.stderr.strip():
+            print("--- scanner stderr ---")
+            print(proc.stderr.strip())
+
+        # 3) Read produced files from temp dir
+        produced_contents = {}
+        for fname in EXPECTED_FILES:
+            p = tmpdir / fname
+            produced_contents[fname] = read_file_safe(p)
+
+        # 4) Compare and print diffs
+        all_pass = True
+        for fname in EXPECTED_FILES:
+            expected = expected_contents.get(fname)
+            produced = produced_contents.get(fname)
+            fromfile = f"{test_dir}/{fname} (expected)"
+            tofile = f"{test_dir}/{fname} (produced)"
+            diff = unified_diff_str(expected, produced, fromfile, tofile)
+            if diff:
+                all_pass = False
+                print(f"\n--- DIFF for {fname} ---")
+                print(diff)
+            else:
+                print(f"\n{fname}: OK (no differences)")
+
+        # 5) Return summary boolean (treat nonzero returncode as failure)
+        if all_pass and proc.returncode == 0:
+            print(f"\n>>> TEST {test_dir.name} PASS")
+            return True
         else:
-            print(f"\n{fname}: OK (no differences)")
-
-    # 5) Summary line
-    if all_pass and proc.returncode == 0:
-        print(f"\n>>> TEST {test_dir.name} PASS")
-        return True
-    else:
-        print(f"\n>>> TEST {test_dir.name} FAIL (return code {proc.returncode})")
-        return False
+            print(f"\n>>> TEST {test_dir.name} FAIL (return code {proc.returncode})")
+            return False
 
 def main():
     root = Path.cwd()
     lexical_script = LEXICAL_SCRIPT
     if not lexical_script.exists():
-        # try absolute path relative to script file
+        # try relative to this script's directory
         script_parent = Path(__file__).parent.resolve()
-        lexical_script = (script_parent / LEXICAL_SCRIPT).resolve()
+        maybe = (script_parent / LEXICAL_SCRIPT).resolve()
+        if maybe.exists():
+            lexical_script = maybe
+
     print(f"Using lexical scanner: {lexical_script.resolve()}")
     print(f"Tests directory: {TESTS_DIR.resolve()}\n")
 
