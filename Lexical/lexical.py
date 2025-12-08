@@ -188,8 +188,7 @@ def main():
             for lineno in sorted(lines_output.keys()):
                 line_content = " ".join(lines_output[lineno])
                 f.write(f"{lineno}. {line_content}\n")
-        print(f"Tokenization complete. Output saved to {output_file}")
-        
+        print(f"Tokenization complete. Output saved to {output_file}")      
     except IOError as e:
         print(f"Error writing to {output_file}: {e}")
 
