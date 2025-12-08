@@ -66,7 +66,7 @@ class Scanner:
                     f.write('No lexical errors found.\n')
                     return
                 for ln, thrown, msg in self.lex_errors:
-                    f.write(f"{ln}: '{thrown}' -> {msg}\n")
+                    f.write(f"{ln}. ({thrown}, {msg})\n")
         except IOError as e:
             print(f"Error writing lexical errors file {filename}: {e}")
 
@@ -94,10 +94,9 @@ class Scanner:
             # sort lexemes alphabetically for output
             items = sorted(self.symbol_table.items(), key=lambda x: x[0])
             with open(filename, 'w', encoding='utf-8') as f:
-                f.write("Index\tLexeme\tClass\tFirstSeen\n")
                 for idx, (lex, meta) in enumerate(items, start=1):
                     first_seen = meta['first_seen'] if meta['first_seen'] is not None else '-'
-                    f.write(f"{idx}\t{lex}\t{meta['class']}\t{first_seen}\n")
+                    f.write(f"{idx}.\t{lex}\n")
         except IOError as e:
             print(f"Error writing symbol table file {filename}: {e}")
 
