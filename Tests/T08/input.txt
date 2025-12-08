@@ -1,0 +1,6 @@
+int invalid@char = 1;
+int num = 045;
+// Comment with invalid num 078
+int another_num = 078;
+/* Comment with stray */ */
+return;

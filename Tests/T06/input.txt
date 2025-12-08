@@ -1,0 +1,9 @@
+/* Multi-line
+comment with
+leading zero test: 005 */
+int _leading_underscore = 1;
+int trailing_underscore_ = 2;
+int mid_underscore_var = _leading_underscore + trailing_underscore_;
+// Single-line comment with invalid num 012
+int invalid_num = 012;
+return;

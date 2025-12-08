@@ -1,0 +1,7 @@
+void main(void) {
+	int a = 0;
+	/* Unclosed comment test
+	a = 1;
+	// Mixed comment
+	a = 002;  // Leading zero
+}

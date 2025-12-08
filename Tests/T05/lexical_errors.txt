@@ -1,0 +1,2 @@
+8.	(>, Illegal character)
+9.	(010, Malformed number)

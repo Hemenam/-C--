@@ -1,0 +1,4 @@
+1.	(invalid@char, Illegal character)
+2.	(045, Malformed number)
+4.	(078, Malformed number)
+5.	(*/, Stray closing comment)

@@ -1,0 +1,12 @@
+int func(int param) {
+	int local_var = param + 1;
+	return local_var * 2;
+}
+void main(void) {
+	int result = func(5);
+	// This is a single-line comment
+	if (result > 10) {
+		result = 010;  // Leading zero test
+	}
+	return;
+}

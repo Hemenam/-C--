@@ -1,0 +1,12 @@
+1.	break
+2.	else
+3.	for
+4.	if
+5.	int
+6.	return
+7.	void
+8.	func
+9.	local_var
+10.	main
+11.	param
+12.	result

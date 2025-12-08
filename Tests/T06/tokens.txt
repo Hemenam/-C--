@@ -1,0 +1,5 @@
+4.	(KEYWORD, int) (ID, _leading_underscore) (SYMBOL, =) (NUM, 1) (SYMBOL, ;) 
+5.	(KEYWORD, int) (ID, trailing_underscore_) (SYMBOL, =) (NUM, 2) (SYMBOL, ;) 
+6.	(KEYWORD, int) (ID, mid_underscore_var) (SYMBOL, =) (ID, _leading_underscore) (SYMBOL, +) (ID, trailing_underscore_) (SYMBOL, ;) 
+8.	(KEYWORD, int) (ID, invalid_num) (SYMBOL, =) (SYMBOL, ;) 
+9.	(KEYWORD, return) (SYMBOL, ;) 

@@ -1,0 +1,4 @@
+1.	(KEYWORD, int) (SYMBOL, =) (NUM, 1) (SYMBOL, ;) 
+2.	(KEYWORD, int) (ID, num) (SYMBOL, =) (SYMBOL, ;) 
+4.	(KEYWORD, int) (ID, another_num) (SYMBOL, =) (SYMBOL, ;) 
+6.	(KEYWORD, return) (SYMBOL, ;) 
