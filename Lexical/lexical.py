@@ -35,6 +35,15 @@ class Scanner:
         self.symbol_table = OrderedDict()
         self._initialize_symbol_table_with_keywords()
 
+        # Track last returned token: (toktype, lexeme, end_pos, lineno)
+        # end_pos is the scanner position (self.pos) immediately after the token
+        self.last_token = None
+
+        # Flag used to tell main() to remove the previously emitted token from lines_output
+        self._remove_last_token = False
+        self._removed_last_token_lexeme = None
+        self._removed_last_token_lineno = None
+
     def _initialize_symbol_table_with_keywords(self):
         """Initialize symbol table with keywords sorted alphabetically."""
         for kw in sorted(KEYWORDS):
@@ -81,6 +90,21 @@ class Scanner:
             return
         # New identifier: add it
         self.symbol_table[lexeme] = {'class': tokclass, 'first_seen': first_seen_line}
+
+    def remove_id_from_symbol_table_if_present(self, lexeme, lineno):
+        """Remove previously-added identifier lexeme from symbol table if it matches an ID and first_seen==lineno.
+           This prevents illegal constructs like 'invalid@char' from leaving 'invalid' in the symbol table.
+        """
+        if lexeme in self.symbol_table:
+            entry = self.symbol_table[lexeme]
+            if entry['class'] == TokenType.ID:
+                # Remove the ID entry unconditionally (safer), or you can check first_seen==lineno if desired.
+                del self.symbol_table[lexeme]
+
+    def clear_remove_flag(self):
+        self._remove_last_token = False
+        self._removed_last_token_lexeme = None
+        self._removed_last_token_lineno = None
 
     def write_symbol_table(self, filename="symbol_table.txt"):
         """Write the symbol table to a file.
@@ -131,6 +155,8 @@ class Scanner:
 
             # 0. Safety: if None (EOF)
             if char is None:
+                # clear last_token and return EOF
+                self.last_token = None
                 return (TokenType.EOF, "EOF", self.lineno)
 
             # Special check: '*/' outside a comment should be treated as stray closing comment
@@ -138,6 +164,8 @@ class Scanner:
                 start_ln = self.lineno
                 self.advance(); self.advance()
                 self.log_error(start_ln, "*/", "Stray closing comment")
+                # reset last_token (no real token produced)
+                self.last_token = None
                 continue
 
             # 1. Handle Whitespace
@@ -155,7 +183,8 @@ class Scanner:
                     comment_content = ""
                     while self.peek() is not None and self.peek() not in ['\n', '\f']:
                         comment_content += self.advance()
-                    # comment is ignored for tokenization (but in the errors spec comments are a token type)
+                    # comment is ignored for tokenization
+                    self.last_token = None
                     continue
 
                 # Case: Block Comment /* */
@@ -174,16 +203,20 @@ class Scanner:
                             break
                         comment_chars += ch
                     if not comment_closed:
-                        # Log open comment at EOF; include at most first 10 chars of comment in thrown string
-                        snippet = (comment_chars[:10] + '...') if len(comment_chars) > 10 else comment_chars
-                        thrown = "/*" + snippet
+                        # Log open comment at EOF with a concise generic thrown string
+                        thrown = "/* Unclosed ..."
                         self.log_error(start_line, thrown, "Open comment at EOF")
+                        # EOF reached after open comment
+                        self.last_token = None
                         return (TokenType.EOF, "EOF", self.lineno)
+                    self.last_token = None
                     continue
 
                 # Case: Division / (if '/' is a symbol)
                 else:
-                    return (TokenType.SYMBOL, self.advance(), self.lineno)
+                    lex = self.advance()
+                    self.last_token = (TokenType.SYMBOL, lex, self.pos, self.lineno)
+                    return (TokenType.SYMBOL, lex, self.lineno)
 
             # 3. Handle Identifiers and Keywords (Starts with Letter or Underscore)
             if char.isalpha() or char == '_':
@@ -195,10 +228,12 @@ class Scanner:
                 if lexeme in KEYWORDS:
                     # Add keyword to symbol table (it's already init'd, but ensure presence)
                     self.add_symbol(lexeme, TokenType.KEYWORD, None)
+                    self.last_token = (TokenType.KEYWORD, lexeme, self.pos, start_ln)
                     return (TokenType.KEYWORD, lexeme, start_ln)
                 else:
                     # Identifier: add to symbol table with first seen line if new
                     self.add_symbol(lexeme, TokenType.ID, start_ln)
+                    self.last_token = (TokenType.ID, lexeme, self.pos, start_ln)
                     return (TokenType.ID, lexeme, start_ln)
 
             # 4. Handle Numbers
@@ -220,6 +255,7 @@ class Scanner:
                         thrown += extra
                         # Update last logged thrown to include extra snippet if any
                         self.lex_errors[-1] = (start_line, thrown, "Malformed number")
+                    self.last_token = None
                     return self.get_next_token()
 
                 # Consume rest of digits
@@ -239,35 +275,101 @@ class Scanner:
                     if extra:
                         thrown += extra
                         self.lex_errors[-1] = (start_line, thrown, "Malformed number")
+                    self.last_token = None
                     return self.get_next_token()
 
+                self.last_token = (TokenType.NUM, lexeme, self.pos, start_line)
                 return (TokenType.NUM, lexeme, start_line)
 
             # 5. Handle Symbols (including multi-char ==)
             if char == '=':
                 if self.peek(1) == '=':
                     lexeme = self.advance() + self.advance()
+                    self.last_token = (TokenType.SYMBOL, lexeme, self.pos, self.lineno)
                     return (TokenType.SYMBOL, lexeme, self.lineno)
                 else:
-                    return (TokenType.SYMBOL, self.advance(), self.lineno)
+                    lex = self.advance()
+                    self.last_token = (TokenType.SYMBOL, lex, self.pos, self.lineno)
+                    return (TokenType.SYMBOL, lex, self.lineno)
 
             if char in SYMBOLS:
-                return (TokenType.SYMBOL, self.advance(), self.lineno)
+                lex = self.advance()
+                self.last_token = (TokenType.SYMBOL, lex, self.pos, self.lineno)
+                return (TokenType.SYMBOL, lex, self.lineno)
 
             # 6. Illegal Character (can't begin any token)
             ch = self.peek()
             if ch is not None:
                 start_ln = self.lineno
-                thrown = self.advance()
+
+                # We will build a thrown string that includes any contiguous identifier-like parts
+                # immediately before and after the illegal char (no whitespace).
+                start_pos = self.pos  # position of the illegal character in src
+
+                # Look back for an alnum/_ contiguous left part
+                left = ""
+                if start_pos - 1 >= 0:
+                    i = start_pos - 1
+                    # include letters/digits/underscore contiguous to the left
+                    while i >= 0 and (self.src[i].isalnum() or self.src[i] == '_'):
+                        i -= 1
+                    # i stopped at non-id char (or -1). left substring is (i+1 .. start_pos-1)
+                    if (i + 1) <= (start_pos - 1):
+                        left = self.src[i+1:start_pos]
+
+                # Now consume the illegal char itself
+                illegal_char = self.advance()  # consumes the illegal char
+                thrown = illegal_char
+
+                # If there's a left part (e.g., 'invalid' from 'invalid@...'), prepend it
+                if left:
+                    thrown = left + thrown
+
+                # Look forward for an alnum/_ contiguous right part and consume it
+                right = ""
+                while self.peek() is not None and (self.peek().isalnum() or self.peek() == '_'):
+                    right += self.advance()
+                if right:
+                    thrown += right
+
+                # If the illegal char occurs immediately after a previously returned identifier token
+                # and that identifier matches the left part, then the identifier must be removed
+                # from the tokens output and from the symbol table.
+                adjacent = False
+                last_lexeme = None
+                last_ln = None
+                if self.last_token is not None:
+                    last_ttype, last_toklex, last_endpos, last_ln = self.last_token
+                    # last_endpos is the scanner position immediately after that token was formed.
+                    # The illegal char's original start_pos should match last_endpos for adjacency.
+                    if last_ttype == TokenType.ID and last_endpos == start_pos and left and last_toklex == left:
+                        adjacent = True
+                        last_lexeme = last_toklex
+
+                # If adjacent, set removal flags to tell main() to remove the earlier token from output.
+                if adjacent:
+                    self._remove_last_token = True
+                    self._removed_last_token_lexeme = last_lexeme
+                    self._removed_last_token_lineno = last_ln
+                    # Also remove the ID from the symbol table to prevent it lingering there.
+                    self.remove_id_from_symbol_table_if_present(last_lexeme, last_ln)
+
+                # Log the illegal-character error with the full thrown string
                 self.log_error(start_ln, thrown, "Illegal character")
-                # Panic mode: consume until token start (excluding char already consumed)
+
+                # Panic mode: consume until token start (excluding chars already consumed)
                 extra = self._panic_consume_until_token_start()
                 if extra:
+                    # If panic consumed extra junk, append it to thrown in the recorded error
                     thrown_full = thrown + extra
                     self.lex_errors[-1] = (start_ln, thrown_full, "Illegal character")
+
+                # After recording the illegal-character error, reset last_token and continue scanning
+                self.last_token = None
                 return self.get_next_token()
 
         # End while loop -> EOF
+        self.last_token = None
         return (TokenType.EOF, "EOF", self.lineno)
 
 
@@ -289,6 +391,24 @@ def main():
 
     while True:
         token_type, token_string, lineno = scanner.get_next_token()
+
+        # If scanner indicates a previously emitted ID must be removed from output, do it now.
+        if scanner._remove_last_token:
+            lex = scanner._removed_last_token_lexeme
+            ln = scanner._removed_last_token_lineno
+            # Remove the most-recent occurrence of that token lexeme on that line (if present)
+            if ln in lines_output:
+                token_repr_to_remove = f"({TokenType.ID}, {lex})"
+                # remove the first matching occurrence from the end (most recently added)
+                for i in range(len(lines_output[ln]) - 1, -1, -1):
+                    if lines_output[ln][i] == token_repr_to_remove:
+                        del lines_output[ln][i]
+                        # If that leaves the line with no tokens, remove the key
+                        if not lines_output[ln]:
+                            del lines_output[ln]
+                        break
+            # Clear the flag
+            scanner.clear_remove_flag()
 
         if token_type == TokenType.EOF:
             break
