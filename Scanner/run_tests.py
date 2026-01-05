@@ -27,7 +27,7 @@ from pathlib import Path
 # ---------- Configuration ----------
 NUM_TESTS = 1
 TESTS_DIR = Path("Tests")
-LEXICAL_SCRIPT = "compiler.py"
+LEXICAL_SCRIPT = Path("compiler.py")
 EXPECTED_FILES = ["parse_tree.txt", "syntax_errors.txt"]
 RUN_TIMEOUT_SECONDS = 15
 

@@ -4,7 +4,6 @@
 
 import re
 from typing import List, Optional
-import sys, os
 
 TOKEN_TYPES = {
     'KEYWORD': 'KEYWORD',
@@ -383,7 +382,11 @@ class Parser:
         else:
             self.error('Expected ) after if condition')
         node.add(self.statement())
-        # expect else
+        node.add(self.else_stmt())
+        return node
+
+    def else_stmt(self) -> Node:
+        node = Node('Else-stmt')
         if self.cur().type == TOKEN_TYPES['KEYWORD'] and self.cur().lexeme == 'else':
             node.add(TokenNode(self.cur())); self.advance()
             node.add(self.statement())
@@ -678,19 +681,17 @@ class Parser:
 
 # ---------- Runner ----------
 if __name__ == '__main__':
+    import sys, os
+
     input_path = 'input.txt'
     if not os.path.exists(input_path):
         print("input.txt not found. Please create 'input.txt' with the source program and run again.")
         sys.exit(1)
 
-
     with open(input_path, 'r', encoding='utf-8') as f:
         source = f.read()
 
     tokens = scan(source)
-    # uncomment to print tokens
-    # for t in tokens: print(t)
-
     parser = Parser(tokens)
     tree = parser.parse()
 
@@ -698,11 +699,11 @@ if __name__ == '__main__':
     lines = tree_to_lines(tree)
     with open('parse_tree.txt', 'w', encoding='utf-8') as f:
         for ln in lines:
-            f.write(ln + '\n')
+            f.write(ln + "\n")
     with open('syntax_errors.txt', 'w', encoding='utf-8') as f:
         if parser.errors:
             for e in parser.errors:
-                f.write(e + '\n')
+                f.write(e + "\n")
         else:
             f.write('No syntax errors.\n')
 
