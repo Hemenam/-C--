@@ -1,0 +1,14 @@
+/* sample 3 */
+
+int fibonachi(int n){
+  if(n==1)
+     return 1;
+  if(n==2)
+     return 2;
+  return fibonachi(n) + fibonachi(n-1);
+}
+
+void main(void){
+	int result;
+        result = fibonachi(5);
+}
