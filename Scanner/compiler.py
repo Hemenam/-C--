@@ -1,6 +1,10 @@
-# scanner_to_parse_and_errors.py
-# Run: python scanner_to_parse_and_errors.py
-# Produces: parse_tree.txt and syntax_errors.txt
+# Predictive Recursive Descent Parser + Scanner
+# Produces: parse_tree.txt and syntax_errors.txt for an input C-like program
+# Token types and grammar as provided by the user.
+
+import re
+from typing import List, Optional
+import sys, os
 
 TOKEN_TYPES = {
     'KEYWORD': 'KEYWORD',
@@ -15,330 +19,691 @@ KEYWORDS_LIST = ['if', 'else', 'void', 'int', 'for', 'break', 'return']
 SYMBOLS_LIST = [';', ':', ',', '[', ']', '(', ')', '{', '}', '+', '-', '*', '/', '=', '<', '==']
 WHITESPACE_CHARS = [' ', '\n', '\r', '\t', '\v', '\f']
 
-class Scanner:
-    def __init__(self, source_code):
-        self.source = source_code
-        self.current_position = 0
-        self.source_length = len(source_code)
-        self.current_line = 1
-        self.has_errors = False
-        self.error_list = []
-        self.symbols = {}
-        self.previous_token = None
-        self.should_remove_last = False
-        self.token_to_remove = None
-        self.line_to_remove = None
-        
-        for word in KEYWORDS_LIST:
-            self.symbols[word] = {'type': TOKEN_TYPES['KEYWORD'], 'first_line': None}
+# ---------- Scanner ----------
+class Token:
+    def __init__(self, typ, lexeme, line=1, col=1):
+        self.type = typ
+        self.lexeme = lexeme
+        self.line = line
+        self.col = col
+    def __repr__(self):
+        return f"({self.type}, {self.lexeme})"
 
-    def look_ahead(self, steps=0):
-        if self.current_position + steps >= self.source_length:
+
+def scan(source: str) -> List[Token]:
+    tokens: List[Token] = []
+    i = 0
+    line = 1
+    col = 1
+    n = len(source)
+
+    def peek(k=0):
+        return source[i+k] if i+k < n else ''
+
+    while i < n:
+        ch = source[i]
+        # whitespace
+        if ch in WHITESPACE_CHARS:
+            if ch == '\n':
+                line += 1
+                col = 1
+            else:
+                col += 1
+            i += 1
+            continue
+        # comments (/* ... */)
+        if ch == '/' and peek(1) == '*':
+            i += 2
+            col += 2
+            while i < n and not (source[i] == '*' and peek(1) == '/'):
+                if source[i] == '\n':
+                    line += 1
+                    col = 1
+                else:
+                    col += 1
+                i += 1
+            if i < n:
+                i += 2
+                col += 2
+            continue
+        # numbers
+        if ch.isdigit():
+            start_col = col
+            j = i
+            while j < n and source[j].isdigit():
+                j += 1
+            lex = source[i:j]
+            tokens.append(Token(TOKEN_TYPES['NUM'], lex, line, start_col))
+            col += (j - i)
+            i = j
+            continue
+        # identifiers / keywords
+        if ch.isalpha() or ch == '_':
+            start_col = col
+            j = i
+            while j < n and (source[j].isalnum() or source[j] == '_'):
+                j += 1
+            lex = source[i:j]
+            typ = TOKEN_TYPES['KEYWORD'] if lex in KEYWORDS_LIST else TOKEN_TYPES['ID']
+            tokens.append(Token(typ, lex, line, start_col))
+            col += (j - i)
+            i = j
+            continue
+        # two-char symbol '=='
+        if ch == '=' and peek(1) == '=':
+            tokens.append(Token(TOKEN_TYPES['SYMBOL'], '==', line, col))
+            i += 2
+            col += 2
+            continue
+        # single char symbols
+        if ch in ''.join(set(''.join(SYMBOLS_LIST))):
+            # treat = (assignment) also as SYMBOL
+            tokens.append(Token(TOKEN_TYPES['SYMBOL'], ch, line, col))
+            i += 1
+            col += 1
+            continue
+        # unknown / error char
+        tokens.append(Token(TOKEN_TYPES['ERROR'], ch, line, col))
+        i += 1
+        col += 1
+    tokens.append(Token(TOKEN_TYPES['EOF'], '$', line, col))
+    return tokens
+
+# ---------- Parse Tree Node ----------
+class Node:
+    def __init__(self, label: str, children: Optional[List['Node']]=None):
+        self.label = label
+        self.children = children or []
+    def add(self, node: 'Node'):
+        self.children.append(node)
+
+    def is_leaf_token(self):
+        return False
+
+class TokenNode(Node):
+    def __init__(self, token: Token):
+        super().__init__(f"({token.type}, {token.lexeme})")
+    def is_leaf_token(self):
+        return True
+
+# pretty print the tree like the example
+def tree_to_lines(node: Node, prefix: str = '', is_last: bool = True) -> List[str]:
+    lines = []
+    connector = '└── ' if is_last else '├── '
+    lines.append(prefix + connector + node.label if prefix else node.label)
+    if node.children:
+        new_prefix = prefix + ('    ' if is_last else '│   ')
+        for i, child in enumerate(node.children):
+            lines.extend(tree_to_lines(child, new_prefix, i == len(node.children)-1))
+    return lines
+
+# ---------- Parser (Predictive Recursive Descent) ----------
+class Parser:
+    def __init__(self, tokens: List[Token]):
+        self.tokens = tokens
+        self.i = 0
+        self.errors = []
+
+    def cur(self) -> Token:
+        return self.tokens[self.i]
+    def advance(self):
+        if self.cur().type != TOKEN_TYPES['EOF']:
+            self.i += 1
+    def match(self, expected_type=None, expected_lexeme=None) -> Optional[TokenNode]:
+        t = self.cur()
+        if expected_type and t.type != expected_type:
+            self.error(f"Expected token type {expected_type} but found {t.type} ('{t.lexeme}') at line {t.line} col {t.col}")
             return None
-        return self.source[self.current_position + steps]
-
-    def move_forward(self):
-        if self.current_position >= self.source_length:
+        if expected_lexeme and t.lexeme != expected_lexeme:
+            self.error(f"Expected '{expected_lexeme}' but found '{t.lexeme}' at line {t.line} col {t.col}")
             return None
-        current_char = self.source[self.current_position]
-        self.current_position += 1
-        if current_char == '\n':
-            self.current_line += 1
-        return current_char
+        node = TokenNode(t)
+        self.advance()
+        return node
 
-    def skip_until_valid(self):
-        skipped = ""
+    def error(self, msg):
+        self.errors.append(msg)
+        # basic panic: skip one token
+        if self.cur().type != TOKEN_TYPES['EOF']:
+            self.advance()
+
+    # Grammar functions follow. Each returns a Node.
+
+    def parse(self) -> Node:
+        root = Node('Program')
+        root.add(self.declaration_list())
+        return root
+
+    def declaration_list(self) -> Node:
+        node = Node('Declaration-list')
+        # if next token starts a Declaration -> Type-specifier 'int' or 'void'
+        while self.cur().type == TOKEN_TYPES['KEYWORD'] and self.cur().lexeme in ('int', 'void'):
+            node.add(self.declaration())
+        # epsilon allowed (if nothing matched)
+        if not node.children:
+            node.children.append(Node('epsilon'))
+        return node
+
+    def declaration(self) -> Node:
+        node = Node('Declaration')
+        node.add(self.declaration_initial())
+        node.add(self.declaration_prime())
+        return node
+
+    def declaration_initial(self) -> Node:
+        node = Node('Declaration-initial')
+        node.add(self.type_specifier())
+        if self.cur().type == TOKEN_TYPES['ID']:
+            node.add(TokenNode(self.cur())); self.advance()
+        else:
+            self.error(f"Expected ID in Declaration-initial at {self.cur().line}:{self.cur().col}")
+        return node
+
+    def declaration_prime(self) -> Node:
+        node = Node('Declaration-prime')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == '(':
+            node.add(self.fun_declaration_prime())
+        else:
+            node.add(self.var_declaration_prime())
+        return node
+
+    def var_declaration_prime(self) -> Node:
+        node = Node('Var-declaration-prime')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == '[':
+            node.add(TokenNode(self.cur())); self.advance()
+            if self.cur().type == TOKEN_TYPES['NUM']:
+                node.add(TokenNode(self.cur())); self.advance()
+            else:
+                self.error('Expected NUM in array declaration')
+            if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ']':
+                node.add(TokenNode(self.cur())); self.advance()
+            else:
+                self.error('Expected ] in array declaration')
+            if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ';':
+                node.add(TokenNode(self.cur())); self.advance()
+            else:
+                self.error('Expected ; after array declaration')
+        elif self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ';':
+            node.add(TokenNode(self.cur())); self.advance()
+        else:
+            # error recovery: accept semicolon if possible
+            self.error('Expected ; or [ in Var-declaration-prime')
+            # try to synchronize
+            while self.cur().type != TOKEN_TYPES['SYMBOL'] or self.cur().lexeme != ';':
+                if self.cur().type == TOKEN_TYPES['EOF']:
+                    break
+                self.advance()
+            if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ';':
+                node.add(TokenNode(self.cur())); self.advance()
+        return node
+
+    def fun_declaration_prime(self) -> Node:
+        node = Node('Fun-declaration-prime')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == '(':
+            node.add(TokenNode(self.cur())); self.advance()
+        else:
+            self.error('Expected ( in Fun-declaration-prime')
+        node.add(self.params())
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ')':
+            node.add(TokenNode(self.cur())); self.advance()
+        else:
+            self.error('Expected ) in Fun-declaration-prime')
+        node.add(self.compound_stmt())
+        return node
+
+    def type_specifier(self) -> Node:
+        node = Node('Type-specifier')
+        if self.cur().type == TOKEN_TYPES['KEYWORD'] and self.cur().lexeme in ('int','void'):
+            node.add(TokenNode(self.cur())); self.advance()
+        else:
+            self.error('Expected int or void in Type-specifier')
+        return node
+
+    def params(self) -> Node:
+        node = Node('Params')
+        if self.cur().type == TOKEN_TYPES['KEYWORD'] and self.cur().lexeme == 'void':
+            node.add(TokenNode(self.cur())); self.advance()
+            return node
+        # expect: int ID Param-prime Param-list
+        if self.cur().type == TOKEN_TYPES['KEYWORD'] and self.cur().lexeme == 'int':
+            node.add(TokenNode(self.cur())); self.advance()
+            if self.cur().type == TOKEN_TYPES['ID']:
+                node.add(TokenNode(self.cur())); self.advance()
+            else:
+                self.error('Expected ID in Params')
+            node.add(self.param_prime())
+            node.add(self.param_list())
+        else:
+            self.error('Expected Params: void or int ID ...')
+        return node
+
+    def param_list(self) -> Node:
+        node = Node('Param-list')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ',':
+            node.add(TokenNode(self.cur())); self.advance()
+            node.add(self.param())
+            node.children.append(self.param_list())
+        else:
+            node.children.append(Node('epsilon'))
+        return node
+
+    def param(self) -> Node:
+        node = Node('Param')
+        node.add(self.declaration_initial())
+        node.add(self.param_prime())
+        return node
+
+    def param_prime(self) -> Node:
+        node = Node('Param-prime')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == '[':
+            node.add(TokenNode(self.cur())); self.advance()
+            if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ']':
+                node.add(TokenNode(self.cur())); self.advance()
+            else:
+                self.error('Expected ] in Param-prime')
+        else:
+            node.children.append(Node('epsilon'))
+        return node
+
+    def compound_stmt(self) -> Node:
+        node = Node('Compound-stmt')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == '{':
+            node.add(TokenNode(self.cur())); self.advance()
+        else:
+            self.error('Expected { in Compound-stmt')
+        node.add(self.declaration_list())
+        node.add(self.statement_list())
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == '}':
+            node.add(TokenNode(self.cur())); self.advance()
+        else:
+            self.error('Expected } in Compound-stmt')
+        return node
+
+    def statement_list(self) -> Node:
+        node = Node('Statement-list')
+        # Statement starts with: ID, '{', 'if', 'for', 'return', 'break', ';'
         while True:
-            next_char = self.look_ahead()
-            if next_char is None:
+            t = self.cur()
+            if (t.type == TOKEN_TYPES['ID'] or (t.type == TOKEN_TYPES['SYMBOL'] and t.lexeme == '{')
+                or (t.type == TOKEN_TYPES['KEYWORD'] and t.lexeme in ('if','for','return','break'))
+                or (t.type == TOKEN_TYPES['SYMBOL'] and t.lexeme == ';')):
+                node.add(self.statement())
+            else:
                 break
-            if next_char in WHITESPACE_CHARS:
-                break
-            if next_char.isalpha() or next_char.isdigit() or next_char == '_' or next_char in SYMBOLS_LIST or next_char == '/' or next_char == '*':
-                break
-            skipped += self.move_forward()
-        return skipped
+        if not node.children:
+            node.children.append(Node('epsilon'))
+        return node
 
-    def get_next_token(self):
-        while self.current_position < self.source_length:
-            current_char = self.look_ahead()
+    def statement(self) -> Node:
+        t = self.cur()
+        if t.type == TOKEN_TYPES['SYMBOL'] and t.lexeme == '{':
+            return self.compound_stmt()
+        if t.type == TOKEN_TYPES['KEYWORD'] and t.lexeme == 'if':
+            return self.selection_stmt()
+        if t.type == TOKEN_TYPES['KEYWORD'] and t.lexeme == 'for':
+            return self.iteration_stmt()
+        if t.type == TOKEN_TYPES['KEYWORD'] and t.lexeme == 'return':
+            return self.return_stmt()
+        # Expression-stmt: break ; or ; or Expression ;
+        return self.expression_stmt()
 
-            if current_char is None:
-                self.previous_token = None
-                return (TOKEN_TYPES['EOF'], "EOF", self.current_line)
-
-            if current_char == '*' and self.look_ahead(1) == '/':
-                line_num = self.current_line
-                self.move_forward()
-                self.move_forward()
-                self.has_errors = True
-                self.error_list.append((line_num, "*/", "Stray closing comment"))
-                self.previous_token = None
-                continue
-
-            if current_char in WHITESPACE_CHARS:
-                self.move_forward()
-                continue
-
-            if current_char == '/':
-                next_char = self.look_ahead(1)
-                
-                if next_char == '/':
-                    self.move_forward(); self.move_forward()
-                    while True:
-                        ch = self.look_ahead()
-                        if ch is None or ch == '\n' or ch == '\f':
-                            break
-                        self.move_forward()
-                    self.previous_token = None
-                    continue
-                
-                elif next_char == '*':
-                    self.move_forward(); self.move_forward()
-                    closed = False
-                    start_line = self.current_line
-                    while self.current_position < self.source_length:
-                        if self.look_ahead() == '*' and self.look_ahead(1) == '/':
-                            self.move_forward(); self.move_forward()
-                            closed = True
-                            break
-                        self.move_forward()
-                    
-                    if not closed:
-                        self.has_errors = True
-                        self.error_list.append((start_line, "/* Unclosed ...", "Open comment at EOF"))
-                        self.previous_token = None
-                        return (TOKEN_TYPES['EOF'], "EOF", self.current_line)
-                    
-                    self.previous_token = None
-                    continue
-                
-                else:
-                    token_text = self.move_forward()
-                    self.previous_token = (TOKEN_TYPES['SYMBOL'], token_text, self.current_position, self.current_line)
-                    return (TOKEN_TYPES['SYMBOL'], token_text, self.current_line)
-
-            if current_char.isalpha() or current_char == '_':
-                identifier = ""
-                start_line = self.current_line
-                while True:
-                    ch = self.look_ahead()
-                    if ch is None:
-                        break
-                    if not (ch.isalnum() or ch == '_'):
-                        break
-                    identifier += self.move_forward()
-
-                if identifier in KEYWORDS_LIST:
-                    self.symbols[identifier] = {'type': TOKEN_TYPES['KEYWORD'], 'first_line': None}
-                    self.previous_token = (TOKEN_TYPES['KEYWORD'], identifier, self.current_position, start_line)
-                    return (TOKEN_TYPES['KEYWORD'], identifier, start_line)
-                else:
-                    self.symbols[identifier] = {'type': TOKEN_TYPES['ID'], 'first_line': start_line}
-                    self.previous_token = (TOKEN_TYPES['ID'], identifier, self.current_position, start_line)
-                    return (TOKEN_TYPES['ID'], identifier, start_line)
-
-            if current_char.isdigit():
-                number_text = ""
-                start_line = self.current_line
-                number_text += self.move_forward()
-
-                if number_text == '0' and self.look_ahead() is not None and self.look_ahead().isdigit():
-                    rest = ""
-                    while True:
-                        ch = self.look_ahead()
-                        if ch is None:
-                            break
-                        if not (ch.isalnum() or ch == '_'):
-                            break
-                        rest += self.move_forward()
-                    error_text = number_text + rest
-                    self.has_errors = True
-                    self.error_list.append((start_line, error_text, "Malformed number"))
-                    extra = self.skip_until_valid()
-                    if extra:
-                        error_text += extra
-                        self.error_list[-1] = (start_line, error_text, "Malformed number")
-                    self.previous_token = None
-                    return self.get_next_token()
-
-                while True:
-                    ch = self.look_ahead()
-                    if ch is None or not ch.isdigit():
-                        break
-                    number_text += self.move_forward()
-
-                ch = self.look_ahead()
-                if ch is not None and (ch.isalpha() or ch == '_'):
-                    rest = ""
-                    while True:
-                        ch = self.look_ahead()
-                        if ch is None:
-                            break
-                        if not (ch.isalnum() or ch == '_'):
-                            break
-                        rest += self.move_forward()
-                    error_text = number_text + rest
-                    self.has_errors = True
-                    self.error_list.append((start_line, error_text, "Malformed number"))
-                    extra = self.skip_until_valid()
-                    if extra:
-                        error_text += extra
-                        self.error_list[-1] = (start_line, error_text, "Malformed number")
-                    self.previous_token = None
-                    return self.get_next_token()
-
-                self.previous_token = (TOKEN_TYPES['NUM'], number_text, self.current_position, start_line)
-                return (TOKEN_TYPES['NUM'], number_text, start_line)
-
-            if current_char == '=':
-                if self.look_ahead(1) == '=':
-                    token_text = self.move_forward() + self.move_forward()
-                    self.previous_token = (TOKEN_TYPES['SYMBOL'], token_text, self.current_position, self.current_line)
-                    return (TOKEN_TYPES['SYMBOL'], token_text, self.current_line)
-                else:
-                    token_text = self.move_forward()
-                    self.previous_token = (TOKEN_TYPES['SYMBOL'], token_text, self.current_position, self.current_line)
-                    return (TOKEN_TYPES['SYMBOL'], token_text, self.current_line)
-
-            if current_char in SYMBOLS_LIST:
-                token_text = self.move_forward()
-                self.previous_token = (TOKEN_TYPES['SYMBOL'], token_text, self.current_position, self.current_line)
-                return (TOKEN_TYPES['SYMBOL'], token_text, self.current_line)
-
-            # Illegal/unhandled char branch
-            if current_char is not None:
-                line_num = self.current_line
-                position = self.current_position
-
-                left_part = ""
-                if position - 1 >= 0:
-                    i = position - 1
-                    while i >= 0 and (self.source[i].isalnum() or self.source[i] == '_'):
-                        i -= 1
-                    left_start = i + 1
-                    if left_start <= position - 1:
-                        left_part = self.source[left_start:position]
-
-                bad_char = self.move_forward()
-                error_text = bad_char
-
-                if left_part:
-                    error_text = left_part + error_text
-
-                right_part = ""
-                while True:
-                    ch = self.look_ahead()
-                    if ch is None:
-                        break
-                    if not (ch.isalnum() or ch == '_'):
-                        break
-                    right_part += self.move_forward()
-                
-                if right_part:
-                    error_text += right_part
-
-                is_adjacent = False
-                last_token_name = None
-                last_token_line = None
-                
-                if self.previous_token is not None:
-                    prev_type, prev_text, prev_end, prev_line = self.previous_token
-                    if prev_type == TOKEN_TYPES['ID']:
-                        if prev_end == position:
-                            if left_part and prev_text == left_part:
-                                is_adjacent = True
-                                last_token_name = prev_text
-                                last_token_line = prev_line
-
-                if is_adjacent:
-                    self.should_remove_last = True
-                    self.token_to_remove = last_token_name
-                    self.line_to_remove = last_token_line
-                    if last_token_name in self.symbols and self.symbols[last_token_name]['type'] == TOKEN_TYPES['ID']:
-                        del self.symbols[last_token_name]
-
-                self.has_errors = True
-                self.error_list.append((line_num, error_text, "Illegal character"))
-
-                extra = self.skip_until_valid()
-                if extra:
-                    full_error = error_text + extra
-                    self.error_list[-1] = (line_num, full_error, "Illegal character")
-
-                self.previous_token = None
-                return self.get_next_token()
-
-        self.previous_token = None
-        return (TOKEN_TYPES['EOF'], "EOF", self.current_line)
-
-
-def main():
-    input_filename = "input.txt"
-    parse_tree_filename = "parse_tree.txt"
-    syntax_errors_filename = "syntax_errors.txt"
-
-    try:
-        with open(input_filename, 'r') as f:
-            code = f.read()
-    except Exception as e:
-        print("Error: Cannot open input.txt ->", e)
-        return
-
-    scanner = Scanner(code)
-    token_lines = {}
-
-    # Run scanner and collect tokens grouped by line
-    while True:
-        token_type, token_value, line_number = scanner.get_next_token()
-
-        if scanner.should_remove_last:
-            bad_token = scanner.token_to_remove
-            bad_line = scanner.line_to_remove
-            
-            if bad_line in token_lines:
-                token_string = "(" + TOKEN_TYPES['ID'] + ", " + bad_token + ")"
-                for i in range(len(token_lines[bad_line])):
-                    if token_lines[bad_line][i] == token_string:
-                        del token_lines[bad_line][i]
-                        if len(token_lines[bad_line]) == 0:
-                            del token_lines[bad_line]
-                        break
-            
-            scanner.should_remove_last = False
-            scanner.token_to_remove = None
-            scanner.line_to_remove = None
-
-        if token_type == TOKEN_TYPES['EOF']:
-            break
-
-        token_output = "(" + token_type + ", " + token_value + ")"
-        token_lines.setdefault(line_number, []).append(token_output)
-
-    # --- WRITE parse_tree.txt ---
-    # NOTE: currently this outputs a token-stream grouped by line as a simple placeholder
-    # for a parse tree. If you want a real parse tree from your grammar, I'll implement a parser.
-    with open(parse_tree_filename, 'w') as f:
-        if not token_lines:
-            f.write("Empty input or no tokens found.\n")
+    def expression_stmt(self) -> Node:
+        node = Node('Expression-stmt')
+        if self.cur().type == TOKEN_TYPES['KEYWORD'] and self.cur().lexeme == 'break':
+            node.add(TokenNode(self.cur())); self.advance()
+            if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ';':
+                node.add(TokenNode(self.cur())); self.advance()
+            else:
+                self.error('Expected ; after break')
+            return node
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ';':
+            node.add(TokenNode(self.cur())); self.advance()
+            return node
+        # else parse Expression ;
+        node.add(self.expression())
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ';':
+            node.add(TokenNode(self.cur())); self.advance()
         else:
-            f.write("Parse Tree (token-stream placeholder)\n")
-            f.write("------------------------------------\n")
-            for ln in sorted(token_lines.keys()):
-                line_content = " ".join(token_lines[ln])
-                f.write(f"{ln}. {line_content}\n")
+            self.error('Expected ; after expression')
+        return node
 
-    # --- WRITE syntax_errors.txt ---
-    # Combine lexical errors (from scanner) and keep place for future syntax errors.
-    with open(syntax_errors_filename, 'w') as f:
-        if len(scanner.error_list) == 0:
-            f.write("No lexical errors found.\n")
+    def selection_stmt(self) -> Node:
+        node = Node('Selection-stmt')
+        if self.cur().type == TOKEN_TYPES['KEYWORD'] and self.cur().lexeme == 'if':
+            node.add(TokenNode(self.cur())); self.advance()
         else:
-            for err in scanner.error_list:
-                f.write(str(err[0]) + ". (" + err[1] + ", " + err[2] + ")\n")
+            self.error('Expected if in Selection-stmt')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == '(':
+            node.add(TokenNode(self.cur())); self.advance()
+        else:
+            self.error('Expected ( after if')
+        node.add(self.expression())
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ')':
+            node.add(TokenNode(self.cur())); self.advance()
+        else:
+            self.error('Expected ) after if condition')
+        node.add(self.statement())
+        # expect else
+        if self.cur().type == TOKEN_TYPES['KEYWORD'] and self.cur().lexeme == 'else':
+            node.add(TokenNode(self.cur())); self.advance()
+            node.add(self.statement())
+        else:
+            node.children.append(Node('epsilon'))
+        return node
 
-    print("Done. Wrote:", parse_tree_filename, "and", syntax_errors_filename)
+    def iteration_stmt(self) -> Node:
+        node = Node('Iteration-stmt')
+        if self.cur().type == TOKEN_TYPES['KEYWORD'] and self.cur().lexeme == 'for':
+            node.add(TokenNode(self.cur())); self.advance()
+        else:
+            self.error('Expected for in Iteration-stmt')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == '(':
+            node.add(TokenNode(self.cur())); self.advance()
+        else:
+            self.error('Expected ( after for')
+        node.add(self.expression())
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ';':
+            node.add(TokenNode(self.cur())); self.advance()
+        else:
+            self.error('Expected ; in for header')
+        node.add(self.expression())
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ';':
+            node.add(TokenNode(self.cur())); self.advance()
+        else:
+            self.error('Expected ; in for header (2)')
+        node.add(self.expression())
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ')':
+            node.add(TokenNode(self.cur())); self.advance()
+        else:
+            self.error('Expected ) after for header')
+        node.add(self.compound_stmt())
+        return node
+
+    def return_stmt(self) -> Node:
+        node = Node('Return-stmt')
+        if self.cur().type == TOKEN_TYPES['KEYWORD'] and self.cur().lexeme == 'return':
+            node.add(TokenNode(self.cur())); self.advance()
+        else:
+            self.error('Expected return')
+        # Return-stmt-prime -> Expression ; | ;
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ';':
+            node.add(TokenNode(self.cur())); self.advance()
+        else:
+            node.add(self.expression())
+            if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ';':
+                node.add(TokenNode(self.cur())); self.advance()
+            else:
+                self.error('Expected ; after return expression')
+        return node
+
+    # Expressions (simplified but compatible with the grammar)
+    def expression(self) -> Node:
+        # If ID then could be ID B
+        if self.cur().type == TOKEN_TYPES['ID']:
+            node = Node('Expression')
+            node.add(TokenNode(self.cur())); self.advance()
+            node.add(self.B())
+            return node
+        # else parse simple expression
+        node = Node('Expression')
+        node.add(self.simple_expression_zegond())
+        return node
+
+    def B(self) -> Node:
+        node = Node('B')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == '=':
+            node.add(TokenNode(self.cur())); self.advance()
+            node.add(self.expression())
+            return node
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == '[':
+            node.add(TokenNode(self.cur())); self.advance()
+            node.add(self.expression())
+            if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ']':
+                node.add(TokenNode(self.cur())); self.advance()
+            else:
+                self.error('Expected ] in B')
+            node.add(self.H())
+            return node
+        # else Simple-expression-prime
+        node.add(self.simple_expression_prime())
+        return node
+
+    def H(self) -> Node:
+        node = Node('H')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == '=':
+            node.add(TokenNode(self.cur())); self.advance()
+            node.add(self.expression())
+            return node
+        # else G D C (we'll approximate by parsing remaining operators)
+        node.add(self.G())
+        node.add(self.D())
+        node.add(self.C())
+        return node
+
+    def simple_expression_zegond(self) -> Node:
+        node = Node('Simple-expression-zegond')
+        node.add(self.additive_expression_zegond())
+        node.add(self.C())
+        return node
+
+    def simple_expression_prime(self) -> Node:
+        node = Node('Simple-expression-prime')
+        node.add(self.additive_expression_prime())
+        node.add(self.C())
+        return node
+
+    def C(self) -> Node:
+        node = Node('C')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme in ('==','<'):
+            node.add(Node('Relop'))
+            node.children[-1].add(TokenNode(self.cur()))
+            self.advance()
+            node.add(self.additive_expression())
+        else:
+            node.children.append(Node('epsilon'))
+        return node
+
+    def additive_expression(self) -> Node:
+        node = Node('Additive-expression')
+        node.add(self.term())
+        node.add(self.D())
+        return node
+
+    def additive_expression_prime(self) -> Node:
+        node = Node('Additive-expression-prime')
+        node.add(self.term_prime())
+        node.add(self.D())
+        return node
+
+    def additive_expression_zegond(self) -> Node:
+        node = Node('Additive-expression-zegond')
+        node.add(self.term_zegond())
+        node.add(self.D())
+        return node
+
+    def D(self) -> Node:
+        node = Node('D')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme in ('+','-'):
+            node.add(Node('Addop'))
+            node.children[-1].add(TokenNode(self.cur())); self.advance()
+            node.add(self.term())
+            node.add(self.D())
+        else:
+            node.children.append(Node('epsilon'))
+        return node
+
+    def term(self) -> Node:
+        node = Node('Term')
+        node.add(self.signed_factor())
+        node.add(self.G())
+        return node
+
+    def term_prime(self) -> Node:
+        node = Node('Term-prime')
+        node.add(self.factor_prime())
+        node.add(self.G())
+        return node
+
+    def term_zegond(self) -> Node:
+        node = Node('Term-zegond')
+        node.add(self.signed_factor_zegond())
+        node.add(self.G())
+        return node
+
+    def G(self) -> Node:
+        node = Node('G')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme in ('*','/'):
+            node.add(TokenNode(self.cur())); self.advance()
+            node.add(self.signed_factor())
+            node.add(self.G())
+        else:
+            node.children.append(Node('epsilon'))
+        return node
+
+    def signed_factor(self) -> Node:
+        node = Node('Signed-factor')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme in ('+','-'):
+            node.add(TokenNode(self.cur())); self.advance()
+            node.add(self.factor())
+        else:
+            node.add(self.factor())
+        return node
+
+    def signed_factor_zegond(self) -> Node:
+        node = Node('Signed-factor-zegond')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme in ('+','-'):
+            node.add(TokenNode(self.cur())); self.advance()
+            node.add(self.factor())
+        else:
+            node.add(self.factor_zegond())
+        return node
+
+    def factor(self) -> Node:
+        node = Node('Factor')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == '(':
+            node.add(TokenNode(self.cur())); self.advance()
+            node.add(self.expression())
+            if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ')':
+                node.add(TokenNode(self.cur())); self.advance()
+            else:
+                self.error('Expected ) in Factor')
+            return node
+        if self.cur().type == TOKEN_TYPES['ID']:
+            node.add(TokenNode(self.cur())); self.advance()
+            node.add(self.var_call_prime())
+            return node
+        if self.cur().type == TOKEN_TYPES['NUM']:
+            node.add(TokenNode(self.cur())); self.advance()
+            return node
+        self.error('Unexpected token in Factor')
+        return node
+
+    def var_call_prime(self) -> Node:
+        node = Node('Var-call-prime')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == '(':
+            node.add(TokenNode(self.cur())); self.advance()
+            node.add(self.args())
+            if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ')':
+                node.add(TokenNode(self.cur())); self.advance()
+            else:
+                self.error('Expected ) in Var-call-prime')
+            return node
+        node.add(self.var_prime())
+        return node
+
+    def var_prime(self) -> Node:
+        node = Node('Var-prime')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == '[':
+            node.add(TokenNode(self.cur())); self.advance()
+            node.add(self.expression())
+            if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ']':
+                node.add(TokenNode(self.cur())); self.advance()
+            else:
+                self.error('Expected ] in Var-prime')
+        else:
+            node.children.append(Node('epsilon'))
+        return node
+
+    def factor_prime(self) -> Node:
+        node = Node('Factor-prime')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == '(':
+            node.add(TokenNode(self.cur())); self.advance()
+            node.add(self.args())
+            if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ')':
+                node.add(TokenNode(self.cur())); self.advance()
+            else:
+                self.error('Expected ) in Factor-prime')
+        else:
+            node.children.append(Node('epsilon'))
+        return node
+
+    def factor_zegond(self) -> Node:
+        node = Node('Factor-zegond')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == '(':
+            node.add(TokenNode(self.cur())); self.advance()
+            node.add(self.expression())
+            if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ')':
+                node.add(TokenNode(self.cur())); self.advance()
+            else:
+                self.error('Expected ) in Factor-zegond')
+        elif self.cur().type == TOKEN_TYPES['NUM']:
+            node.add(TokenNode(self.cur())); self.advance()
+        else:
+            self.error('Unexpected token in Factor-zegond')
+        return node
+
+    def args(self) -> Node:
+        node = Node('Args')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ')':
+            node.children.append(Node('epsilon'))
+            return node
+        node.add(self.arg_list())
+        return node
+
+    def arg_list(self) -> Node:
+        node = Node('Arg-list')
+        node.add(self.expression())
+        node.add(self.arg_list_prime())
+        return node
+
+    def arg_list_prime(self) -> Node:
+        node = Node('Arg-list-prime')
+        if self.cur().type == TOKEN_TYPES['SYMBOL'] and self.cur().lexeme == ',':
+            node.add(TokenNode(self.cur())); self.advance()
+            node.add(self.expression())
+            node.add(self.arg_list_prime())
+        else:
+            node.children.append(Node('epsilon'))
+        return node
+
+# ---------- Runner ----------
+if __name__ == '__main__':
+    input_path = 'input.txt'
+    if not os.path.exists(input_path):
+        print("input.txt not found. Please create 'input.txt' with the source program and run again.")
+        sys.exit(1)
 
 
-if __name__ == "__main__":
-    main()
+    with open(input_path, 'r', encoding='utf-8') as f:
+        source = f.read()
+
+    tokens = scan(source)
+    # uncomment to print tokens
+    # for t in tokens: print(t)
+
+    parser = Parser(tokens)
+    tree = parser.parse()
+
+    # pretty-print tree to lines
+    lines = tree_to_lines(tree)
+    with open('parse_tree.txt', 'w', encoding='utf-8') as f:
+        for ln in lines:
+            f.write(ln + '\n')
+    with open('syntax_errors.txt', 'w', encoding='utf-8') as f:
+        if parser.errors:
+            for e in parser.errors:
+                f.write(e + '\n')
+        else:
+            f.write('No syntax errors.\n')
+
+    print('Wrote parse_tree.txt and syntax_errors.txt')
